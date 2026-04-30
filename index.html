@@ -288,7 +288,7 @@ select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/
 <div class="pf"><strong style="color:rgba(255,255,255,.82)">SUKRA HOSPITAL</strong> · Viduthalai Nagar, Kovilambakkam, Chennai · <a href="tel:8838088985">88380 88985</a> · <a href="https://sukrahospital.com" target="_blank">sukrahospital.com</a></div>
 
 <script>
-const GAS = "https://script.google.com/macros/s/AKfycbxwO8XTeDzJ9xDBTPSMGTC6foT7ZuKRYHZNBqSIRP34BmrzjYUKKNYjKza9rA-RzaFRGw/exec";
+const GAS = "https://script.google.com/macros/s/AKfycbz6npVdM87f_Cr9toqHqPMcsYSvvpkDRgxIJwnt545yCOqZvcSOs6vAAk-CzJdxP0i31g/exec";
 
 function showForm(r){document.getElementById("whoSec").style.display="none";document.getElementById(r+"Form").classList.add("active");window.scrollTo({top:0,behavior:'smooth'});}
 function goBack(){document.querySelectorAll(".fp").forEach(f=>f.classList.remove("active"));document.getElementById("whoSec").style.display="block";window.scrollTo({top:0,behavior:'smooth'});}
@@ -296,7 +296,6 @@ function chip(el,g,ac){document.querySelectorAll(`#${g} .tc`).forEach(c=>c.class
 function prio(el,g){document.querySelectorAll(`#${g} .pc`).forEach(c=>c.classList.remove("active"));el.classList.add("active");}
 function getChip(g){const e=document.querySelector(`#${g} .tc.am,#${g} .tc.ac`);return e?e.dataset.t:"";}
 function getPrio(g){const e=document.querySelector(`#${g} .pc.active`);return e?e.dataset.p:"Low";}
-
 function onFile(input,prevId,nameId){
   const f=input.files[0];if(!f)return;
   if(f.size>10*1024*1024){alert("File too large. Max 10MB.");input.value="";return;}
@@ -310,47 +309,60 @@ function rmFile(inputId,prevId,nameId){
 }
 function toB64(file){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=rej;r.readAsDataURL(file);});}
 
-// Upload file: POST as text/plain (no CORS preflight), get fileId back, store via GET
-async function uploadFile(ticketId, file, side, noteIdx) {
-  try {
-    const b64 = await toB64(file);
-    const payload = JSON.stringify({
-      action:"uploadFile", ticketId,
-      fileData:b64, mimeType:file.type, fileName:file.name,
-      side: side||"pat", noteIdx: noteIdx||0
-    });
-    // Send as text/plain — "simple" request, no CORS preflight needed
-    const r = await fetch(GAS, {
-      method:"POST",
-      // NO Content-Type header = defaults to text/plain for no-cors
-      // WITH cors mode so we can read the response
-      headers:{"Content-Type":"text/plain"},
-      body: payload
-    });
-    const d = await r.json();
-    if (d.success && d.fileId) {
-      // Now store the fileId in the sheet via GET (no CORS issue)
-      const p = new URLSearchParams({
-        action:"setFileId", ticketId,
-        fileId:d.fileId, fileName:file.name,
-        side: side||"pat", noteIdx: noteIdx||0
+// ── FILE UPLOAD: XHR POST saves to Drive, GET polls for stored ID ──
+function uploadFile(ticketId, file, side, noteIdx) {
+  return new Promise(async (resolve) => {
+    try {
+      const b64 = await toB64(file);
+      const payload = JSON.stringify({
+        action: "uploadFile", ticketId,
+        fileData: b64, mimeType: file.type,
+        fileName: file.name, side: side||"pat",
+        noteIdx: noteIdx||0
       });
-      await fetch(`${GAS}?${p.toString()}`);
-      return d.fileId;
+
+      // XHR with text/plain = simple request (no CORS preflight)
+      // We do NOT read the response (cross-origin POST response is blocked)
+      // Instead, Apps Script writes fileId to sheet, then we poll via GET
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", GAS, true);
+      xhr.setRequestHeader("Content-Type", "text/plain");
+      xhr.send(payload);
+
+      // Poll GET for the fileId (up to 15 seconds)
+      const pollKey = side === "mgmt" ? "mgmt" : "pat";
+      let fileId = null;
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await new Promise(r => setTimeout(r, 1500)); // wait 1.5s between polls
+        try {
+          const r = await fetch(`${GAS}?action=getFileId&ticketId=${encodeURIComponent(ticketId)}&side=${pollKey}`);
+          const d = await r.json();
+          if (pollKey === "mgmt") {
+            // For mgmt: check if Mgmt Files JSON has a new entry
+            let arr=[]; try{arr=JSON.parse(d.value||"[]");}catch(e){}
+            const latest = arr.filter(f => f.noteIdx === (noteIdx||0) && f.fileId && f.fileId.length > 10);
+            if (latest.length > 0) { fileId = latest[latest.length-1].fileId; break; }
+          } else {
+            if (d.fileId && d.fileId.length > 10) { fileId = d.fileId; break; }
+          }
+        } catch(e) { /* keep polling */ }
+      }
+
+      resolve(fileId);
+    } catch(e) {
+      console.error("Upload error:", e);
+      resolve(null);
     }
-    return null;
-  } catch(e) {
-    console.error("File upload error:", e);
-    return null;
-  }
+  });
 }
+
 
 async function submit(role){
   const isP=role==="patient";
-  const name =document.getElementById(isP?"p-name":"s-name").value.trim();
-  const id2  =document.getElementById(isP?"p-mobile":"s-empid").value.trim();
-  const cat  =isP?document.getElementById("p-cat").value:document.getElementById("s-cat").value.trim();
-  const desc =document.getElementById(isP?"p-desc":"s-desc").value.trim();
+  const name=document.getElementById(isP?"p-name":"s-name").value.trim();
+  const id2=document.getElementById(isP?"p-mobile":"s-empid").value.trim();
+  const cat=isP?document.getElementById("p-cat").value:document.getElementById("s-cat").value.trim();
+  const desc=document.getElementById(isP?"p-desc":"s-desc").value.trim();
   if(!name) return alert("Please enter your name.");
   if(!id2)  return alert(isP?"Please enter your mobile number.":"Please enter Employee ID or mobile.");
   if(isP&&!/^\d{10}$/.test(id2)) return alert("Please enter a valid 10-digit mobile number.");
@@ -361,17 +373,15 @@ async function submit(role){
   btn.disabled=true; btn.innerHTML=`<span class="spin"></span>Submitting…`;
 
   const raisedBy=isP?"Patient/Attender":"Staff";
-  const prefix  =isP?"PAT":"STF";
-  const now     =new Date().toLocaleString("en-IN",{timeZone:"Asia/Kolkata"});
+  const prefix=isP?"PAT":"STF";
+  const now=new Date().toLocaleString("en-IN",{timeZone:"Asia/Kolkata"});
 
-  // Submit all form data via GET — no CORS issue
   const params=new URLSearchParams({
     action:"submit", prefix, raisedBy,
-    type:   getChip(isP?"pTC":"sTC"),
-    name, contactId:id2,
-    patientId: isP?(document.getElementById("p-opno").value.trim()||"-"):"-",
-    empId:  isP?"-":id2,
-    dept:   isP?(document.getElementById("p-dept").value||"-"):(document.getElementById("s-dept").value||"-"),
+    type:getChip(isP?"pTC":"sTC"), name, contactId:id2,
+    patientId:isP?(document.getElementById("p-opno").value.trim()||"-"):"-",
+    empId:isP?"-":id2,
+    dept:isP?(document.getElementById("p-dept").value||"-"):(document.getElementById("s-dept").value||"-"),
     directedTo:isP?"-":(document.getElementById("s-dir").value||"-"),
     category:cat, description:desc,
     priority:getPrio(isP?"pPrio":"sPrio"), date:now
@@ -387,11 +397,12 @@ async function submit(role){
     ticketId=`${prefix}-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}-${String(Math.floor(Math.random()*900)+100)}`;
   }
 
-  // Upload file if selected
   const fileInput=document.getElementById(isP?"pFile":"sFile");
   if(fileInput.files&&fileInput.files[0]){
-    btn.innerHTML=`<span class="spin"></span>Uploading file…`;
-    await uploadFile(ticketId, fileInput.files[0], "pat", 0);
+    btn.innerHTML=`<span class="spin"></span>Uploading & saving file… (up to 15 sec)`;
+    const fid=await uploadFile(ticketId, fileInput.files[0], "pat", 0);
+    if(fid) console.log("File saved:", fid);
+    else console.warn("File upload timeout - file may still be processing");
   }
 
   document.getElementById(isP?"pFB":"sFB").style.display="none";
